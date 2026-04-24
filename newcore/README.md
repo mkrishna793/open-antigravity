@@ -1,5 +1,4 @@
 # OpenGravity Core Engine 🌌
-Note :- the V2 of this will come next with the some more updates stay tune with me we build the open source agentic IDE that beaks everything 
 > **A headless, infrastructure-first autonomous AI orchestration engine.**
 
 OpenGravity is a production-grade backend engine designed to execute complex, multi-step software engineering tasks autonomously. It sits between user interfaces (like a CLI or VS Code extension) and Large Language Models, providing a robust sandbox, verifiable execution, and massive token reduction.
