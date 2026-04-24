@@ -16,6 +16,8 @@ import { TypeCheckerTool } from './typechecker.js';
 import { PythonSandboxTool } from './sandbox.js';
 import { SemanticSearchTool } from './semantic.js';
 
+import { DelegateTaskTool } from './delegate.js';
+
 export class ToolRegistry {
   private tools = new Map<string, Tool>();
 
@@ -32,6 +34,7 @@ export class ToolRegistry {
       new SearchCodeTool(),
       new SemanticSearchTool(),
       new PythonSandboxTool(),
+      new DelegateTaskTool(),
       new GitTool(),
       new LinterTool(),
       new Z3VerifyTool(),

@@ -71,6 +71,27 @@ export async function startServer(orchestrator?: AgentOrchestrator) {
     return { ok: true };
   });
 
+  // HitL Endpoints
+  app.post<{ Params: { id: string } }>('/agents/:id/approve', async (req, reply) => {
+    const agent = engine.getAgent(req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+    if (agent.getStatus().state !== 'waiting_feedback') {
+      return reply.code(400).send({ error: 'Agent is not waiting for feedback' });
+    }
+    agent.approveHitL(true);
+    return { success: true, message: 'Agent execution resumed.' };
+  });
+
+  app.post<{ Params: { id: string } }>('/agents/:id/reject', async (req, reply) => {
+    const agent = engine.getAgent(req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+    if (agent.getStatus().state !== 'waiting_feedback') {
+      return reply.code(400).send({ error: 'Agent is not waiting for feedback' });
+    }
+    agent.approveHitL(false);
+    return { success: true, message: 'Agent execution rejected.' };
+  });
+
   // ── Artifacts ──
   app.get<{ Params: { agentId: string } }>('/artifacts/:agentId', async (req) => {
     return engine.getArtifacts().listByAgent(req.params.agentId);

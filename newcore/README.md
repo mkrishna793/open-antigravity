@@ -4,33 +4,32 @@ Note :- the V2 of this will come next with the some more updates stay tune with 
 
 OpenGravity is a production-grade backend engine designed to execute complex, multi-step software engineering tasks autonomously. It sits between user interfaces (like a CLI or VS Code extension) and Large Language Models, providing a robust sandbox, verifiable execution, and massive token reduction.
 
-## ✨ Key Features
+## ✨ Key Features (V2 Architecture)
 
-### 1. 📉 Tool-Level RAG (Semantic Token Reduction)
-Standard agents dump entire codebases into the LLM context, causing massive token burn and severe hallucinations. OpenGravity uses **Tool-Level RAG** (`semantic_search`). When the LLM needs to understand how a component works, the tool searches the local codebase, ranks the chunks by relevance, and returns *only the exact lines needed*. 
+### 1. 📉 True Vector RAG (Semantic Token Reduction)
+Standard agents dump entire codebases into the LLM context, causing massive token burn and severe hallucinations. OpenGravity uses **True Vector RAG** (`semantic_search`). When the LLM needs to understand how a component works, the tool chunks the local codebase, generates embeddings using **Gemini (`text-embedding-004`)**, performs mathematical **Cosine Similarity**, and returns *only the exact top 3 lines needed*. 
 *Result: 50,000 token queries reduced to 500 tokens.*
 
-### 2. 🐍 Python Sandbox (Pass-by-Reference Memory)
-Passing large datasets (e.g., 100k-row CSV files) through an LLM chat window will crash the engine. OpenGravity enforces a **Pass-by-Reference** paradigm. 
-Agents write and execute Python scripts within a shared, secure `python_sandbox`. One agent can pull data and save it to `/workspace/data.csv`. The next agent can write a script to read that exact file and generate a chart. The LLM acts purely as a workflow manager, never touching the raw data itself.
-*Includes **Human-in-the-Loop (HitL)** interception to verify code before sandbox execution.*
+### 2. 🐍 Containerized Python Sandbox (Pass-by-Reference Memory)
+Passing large datasets through an LLM chat window will crash the engine. OpenGravity enforces a **Pass-by-Reference** paradigm. 
+Agents write and execute Python scripts within a secure `python_sandbox` powered by **Docker**. One agent can pull data and save it to `/workspace/data.csv`. The next agent can write a script to read that exact file. The LLM acts purely as a workflow manager.
+*Includes **True Human-in-the-Loop (HitL)**: The Node.js execution loop literally pauses until you hit the `POST /agents/:id/approve` API endpoint.*
 
-### 3. ⚡ Z3 Formal Verification (Hallucination Killer)
-LLMs guess code. OpenGravity **proves** it. Before committing generated code, the engine uses the `z3_verify` tool to formally check:
+### 3. ⚡ Real Z3 SMT Formal Verification
+LLMs guess code. OpenGravity **proves** it. Using the official **Microsoft `z3-solver` WASM library**, the engine formally checks constraints:
 - Array bounds safety (preventing out-of-bounds errors)
 - Null and undefined safety
 - Integer overflows
-- Contract pre/post-conditions
-
 If a constraint fails, Z3 generates a mathematical counterexample and forces the agent to fix the bug before proceeding.
 
-### 4. 🧠 Universal Model Gateway
-Zero vendor lock-in. OpenGravity supports plug-and-play LLM routing with built-in fallback chains:
-- **Mock Provider:** For rapid, cost-free local testing.
-- **Google Gemini:** `gemini-2.5-flash`, `gemini-2.5-pro`
-- **OpenAI:** `gpt-4o`, `gpt-4o-mini`
-- **Anthropic:** `claude-sonnet-4`
-- **Ollama:** Run open-source models completely offline (`llama3`, `deepseek-coder`).
+### 4. 🧠 Multi-Agent Protocol & Persistent State
+- **Delegate Task Tool:** Agents can spawn specialized sub-agents to solve complex problems in parallel.
+- **LibSQL / SQLite Persistence:** Agents do not just live in memory. Every plan, step, and chat message is saved to a local SQLite database (`data/opengravity.db`), meaning agents survive server crashes and can be fully resumed.
+
+### 5. Universal Model Gateway
+Zero vendor lock-in. OpenGravity supports plug-and-play LLM routing:
+- **Google Gemini:** `gemini-2.5-flash` (Default)
+- **OpenAI, Anthropic, Ollama, Mock**
 
 ## 🏗️ Architecture
 
@@ -42,7 +41,9 @@ graph TB
     subgraph Engine Core
         ORCH["Agent Orchestrator"]
         AGENT["Agent (Plan→Execute→Verify)"]
+        STATE[(LibSQL SQLite State)]
         ORCH --> AGENT
+        AGENT <--> STATE
     end
     
     subgraph AI Layer
@@ -50,16 +51,15 @@ graph TB
         GW --> MOCK["Mock"]
         GW --> GEMINI["Gemini"]
         GW --> OLLAMA["Ollama"]
-        GW --> OPENAI["OpenAI"]
     end
     
     subgraph "Tools Layer"
         FS["read_file / write_file"]
         TERM["run_command"]
-        RAG["semantic_search 📉"]
-        SANDBOX["python_sandbox 🐍"]
-        Z3["z3_verify ⚡"]
-        OTHER["git, lint, type_check"]
+        RAG["semantic_search (Cosine Similarity) 📉"]
+        SANDBOX["python_sandbox (Docker + HitL) 🐍"]
+        Z3["z3_verify (SMT-LIB2) ⚡"]
+        DELEGATE["delegate_task 🤖"]
     end
     
     subgraph Security & Trust
@@ -69,7 +69,7 @@ graph TB
     end
     
     AGENT --> GW
-    AGENT --> FS & TERM & RAG & SANDBOX & Z3
+    AGENT --> FS & TERM & RAG & SANDBOX & Z3 & DELEGATE
     AGENT --> ART & AUDIT
     POLICY --> FS & TERM & SANDBOX
 ```

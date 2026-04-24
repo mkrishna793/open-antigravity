@@ -1,9 +1,5 @@
-// ═══════════════════════════════════════════════════════════════
-// OpenGravity — Agent (single autonomous unit of work)
-// Plan → Execute → Verify lifecycle with Z3 integration.
-// ═══════════════════════════════════════════════════════════════
-
 import { EventEmitter } from 'events';
+import { v4 as uuidv4 } from 'uuid';
 import type {
   AgentConfig, AgentState, AgentStatus, ChatMessage,
   CompletionRequest, ExecutionPlan, PlanStep, ToolResult,
@@ -14,6 +10,7 @@ import type { ToolRegistry } from '../tools/index.js';
 import type { ArtifactStore } from '../artifacts/index.js';
 import type { AuditLogger } from '../audit/index.js';
 import type { PolicyEngine } from '../policy/index.js';
+import { getDb } from '../db/index.js';
 
 const SYSTEM_PROMPT = `You are an expert software engineering agent in the OpenGravity Engine.
 
@@ -21,12 +18,11 @@ Your role:
 - Plan, implement, and verify code changes autonomously
 - Use tools to read/write files, run commands, search code
 - Use Z3 verification to prove correctness before committing changes
-- Generate structured execution plans as JSON
-- Always verify your work with tests or Z3 constraints
 
 CRITICAL PARADIGMS:
-1. TOKEN REDUCTION: Never read huge files or dump massive data. Use \`semantic_search\` (Tool-Level RAG) to find only the exact lines you need.
-2. PASS-BY-REFERENCE: Never pass large datasets in your responses. If analyzing data, use \`python_sandbox\` to write data to a file (e.g., /workspace/data.csv), then in your next step, tell the sandbox to read that file. Do NOT print large datasets to stdout.
+1. TOKEN REDUCTION: Never read huge files. Use \`semantic_search\` (Tool-Level RAG) to find only exact lines via cosine similarity.
+2. PASS-BY-REFERENCE: Never pass large datasets. Use \`python_sandbox\` to read/write files directly.
+3. MULTI-AGENT: Use \`delegate_task\` if you need another agent to do sub-work.
 
 When asked to create a plan, respond with JSON matching this schema:
 {
@@ -38,13 +34,8 @@ When asked to create a plan, respond with JSON matching this schema:
   ]
 }
 
-Available tools: read_file, write_file, list_directory, run_command, search_code, semantic_search, python_sandbox, git_operation, lint_code, type_check, z3_verify
-
-CRITICAL: For every code change, consider using z3_verify to check:
-- Array bounds safety
-- Null/undefined safety
-- Integer overflow
-- Pre/post condition correctness`;
+Available tools: read_file, write_file, list_directory, run_command, search_code, semantic_search, python_sandbox, delegate_task, git_operation, lint_code, type_check, z3_verify
+`;
 
 export class Agent extends EventEmitter {
   readonly id: string;
@@ -56,6 +47,9 @@ export class Agent extends EventEmitter {
   private artifactIds: string[] = [];
   private startedAt = 0;
   private updatedAt = 0;
+  
+  // HitL Control
+  private resumeResolver: ((value: boolean) => void) | null = null;
 
   constructor(
     config: AgentConfig,
@@ -69,6 +63,73 @@ export class Agent extends EventEmitter {
     this.id = config.id;
     this.config = config;
     this.messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+  }
+
+  async hydrate(): Promise<void> {
+    const db = await getDb();
+    
+    const agentRows = await db.execute({
+      sql: 'SELECT * FROM agents WHERE id = ?',
+      args: [this.id]
+    });
+    
+    if (agentRows.rows.length > 0) {
+      const row = agentRows.rows[0];
+      this.state = row.state as AgentState;
+      this.currentStep = row.currentStep as number;
+      this.startedAt = row.startedAt as number;
+      this.updatedAt = row.updatedAt as number;
+      
+      const msgRows = await db.execute({
+        sql: 'SELECT * FROM messages WHERE agentId = ? ORDER BY createdAt ASC',
+        args: [this.id]
+      });
+      
+      this.messages = msgRows.rows.map(r => ({
+        role: r.role as any,
+        content: r.content as string,
+        name: r.name as string | undefined,
+        toolCallId: r.toolCallId as string | undefined,
+        toolCalls: r.toolCalls ? JSON.parse(r.toolCalls as string) : undefined
+      }));
+      
+      const planRows = await db.execute({
+        sql: 'SELECT planJson FROM plans WHERE agentId = ?',
+        args: [this.id]
+      });
+      
+      if (planRows.rows.length > 0) {
+        this.plan = JSON.parse(planRows.rows[0].planJson as string);
+      }
+    }
+  }
+
+  async persist(): Promise<void> {
+    const db = await getDb();
+    this.updatedAt = Date.now();
+    
+    await db.execute({
+      sql: `INSERT INTO agents (id, task, model, state, workspaceDir, currentStep, startedAt, updatedAt) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) 
+             ON CONFLICT(id) DO UPDATE SET state=excluded.state, currentStep=excluded.currentStep, updatedAt=excluded.updatedAt`,
+      args: [this.id, this.config.task, this.config.model, this.state, this.config.workspaceDir, this.currentStep, this.startedAt, this.updatedAt]
+    });
+    
+    for (const msg of this.messages) {
+      const msgId = uuidv4();
+      await db.execute({
+        sql: `INSERT OR IGNORE INTO messages (id, agentId, role, content, toolCalls, toolCallId, name, createdAt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [msgId, this.id, msg.role, msg.content, msg.toolCalls ? JSON.stringify(msg.toolCalls) : null, msg.toolCallId || null, msg.name || null, Date.now()]
+      });
+    }
+    
+    if (this.plan) {
+      await db.execute({
+        sql: `INSERT INTO plans (agentId, planJson) VALUES (?, ?) ON CONFLICT(agentId) DO UPDATE SET planJson=excluded.planJson`,
+        args: [this.id, JSON.stringify(this.plan)]
+      });
+    }
   }
 
   getStatus(): AgentStatus {
@@ -86,29 +147,44 @@ export class Agent extends EventEmitter {
     };
   }
 
+  approveHitL(approved: boolean) {
+    if (this.resumeResolver) {
+      this.resumeResolver(approved);
+      this.resumeResolver = null;
+    }
+  }
+
   async run(): Promise<AgentStatus> {
-    this.startedAt = Date.now();
+    if (this.startedAt === 0) {
+      this.startedAt = Date.now();
+      await this.persist();
+    }
     this.audit.log({ agentId: this.id, action: 'agent:start', target: this.config.task, result: 'success', details: '', durationMs: 0 });
 
     try {
-      // Phase 1: Planning
-      await this.setState('planning');
-      this.plan = await this.createPlan();
-      const planArtifact = this.artifacts.createPlanArtifact(this.id, this.plan as any);
-      this.artifactIds.push(planArtifact.id);
-      this.emitEvent({ type: 'agent:artifact_created', agentId: this.id, artifact: planArtifact });
+      if (this.state === 'idle' || this.state === 'planning') {
+        await this.setState('planning');
+        if (!this.plan) {
+          this.plan = await this.createPlan();
+          await this.persist();
+          const planArtifact = this.artifacts.createPlanArtifact(this.id, this.plan as any);
+          this.artifactIds.push(planArtifact.id);
+          this.emitEvent({ type: 'agent:artifact_created', agentId: this.id, artifact: planArtifact });
+        }
+      }
 
-      // Phase 2: Execution
-      await this.setState('executing');
-      await this.executeSteps();
+      if (this.state === 'planning' || this.state === 'executing' || this.state === 'waiting_feedback') {
+        await this.setState('executing');
+        await this.executeSteps();
+      }
 
-      // Phase 3: Verification
-      await this.setState('verifying');
-      await this.verify();
+      if (this.state === 'executing' || this.state === 'verifying') {
+        await this.setState('verifying');
+        await this.verify();
+      }
 
-      // Done
       await this.setState('completed');
-      this.audit.log({ agentId: this.id, action: 'agent:complete', target: this.config.task, result: 'success', details: `${this.plan.steps.length} steps completed`, durationMs: Date.now() - this.startedAt });
+      this.audit.log({ agentId: this.id, action: 'agent:complete', target: this.config.task, result: 'success', details: `${this.plan?.steps.length ?? 0} steps completed`, durationMs: Date.now() - this.startedAt });
 
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -120,33 +196,28 @@ export class Agent extends EventEmitter {
     return this.getStatus();
   }
 
-  // ── Phase 1: Planning ──
-
   private async createPlan(): Promise<ExecutionPlan> {
     this.messages.push({ role: 'user', content: `Create a detailed execution plan for this task:\n\n${this.config.task}\n\nRespond with a JSON execution plan.` });
 
     const response = await this.gateway.complete({
       model: this.config.model,
       messages: this.messages,
-      temperature: 0.3, // Lower temp for structured output
+      temperature: 0.3, 
       maxTokens: 4096,
     });
 
     this.messages.push({ role: 'assistant', content: response.content });
     this.emitEvent({ type: 'gateway:response', model: response.model, latencyMs: response.latencyMs });
 
-    // Parse the plan from the response
     try {
       const jsonMatch = response.content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) throw new Error('No JSON found in planning response');
       const plan = JSON.parse(jsonMatch[0]) as ExecutionPlan;
 
-      // Validate plan structure
       if (!plan.steps || !Array.isArray(plan.steps)) {
         throw new Error('Plan missing steps array');
       }
 
-      // Normalize steps
       plan.steps = plan.steps.map((step, i) => ({
         ...step,
         id: step.id ?? i + 1,
@@ -156,7 +227,6 @@ export class Agent extends EventEmitter {
 
       return plan;
     } catch (err) {
-      // Fallback: create a simple single-step plan
       return {
         taskDescription: this.config.task,
         reasoning: 'Direct execution - could not parse structured plan',
@@ -173,8 +243,6 @@ export class Agent extends EventEmitter {
     }
   }
 
-  // ── Phase 2: Execution ──
-
   private async executeSteps(): Promise<void> {
     if (!this.plan) throw new Error('No plan to execute');
 
@@ -185,11 +253,11 @@ export class Agent extends EventEmitter {
       auditLog: this.audit,
     };
 
-    for (let i = 0; i < this.plan.steps.length; i++) {
+    for (let i = this.currentStep; i < this.plan.steps.length; i++) {
       const step = this.plan.steps[i];
-      this.currentStep = i + 1;
+      this.currentStep = i;
+      await this.persist();
 
-      // Check dependencies
       for (const depId of step.dependsOn) {
         const depStep = this.plan.steps.find(s => s.id === depId);
         if (depStep && depStep.status !== 'completed') {
@@ -198,16 +266,35 @@ export class Agent extends EventEmitter {
         }
       }
 
+      if (step.status === 'skipped') continue;
+
       step.status = 'running';
       this.emitEvent({ type: 'agent:step_started', agentId: this.id, step: step.id, description: step.description });
 
-      // Execute the tool
+      if (step.tool === 'python_sandbox') {
+        await this.setState('waiting_feedback');
+        
+        const approved = await new Promise<boolean>((resolve) => {
+          this.resumeResolver = resolve;
+          console.log(`\n[HitL] 🛑 Agent ${this.id} paused for HitL approval on step ${step.id}`);
+          console.log(`[HitL] API: POST /agents/${this.id}/approve  or  POST /agents/${this.id}/reject\n`);
+        });
+
+        await this.setState('executing');
+        
+        if (!approved) {
+          step.result = { success: false, output: '', error: 'Human rejected execution.' };
+          step.status = 'failed';
+          this.emitEvent({ type: 'agent:step_completed', agentId: this.id, step: step.id, result: step.result });
+          continue;
+        }
+      }
+
       let result: ToolResult;
 
       if (step.tool && this.tools.get(step.tool)) {
         result = await this.tools.execute(step.tool, step.toolInput, toolContext);
       } else {
-        // Use LLM to determine what to do
         result = await this.executeLLMStep(step, toolContext);
       }
 
@@ -216,7 +303,6 @@ export class Agent extends EventEmitter {
 
       this.emitEvent({ type: 'agent:step_completed', agentId: this.id, step: step.id, result });
 
-      // If step failed and we have retries, let the LLM fix it
       if (!result.success && this.config.maxRetries > 0) {
         const fixed = await this.retryStep(step, result, toolContext);
         if (fixed) {
@@ -225,15 +311,16 @@ export class Agent extends EventEmitter {
         }
       }
 
-      // Log result
       this.artifacts.createLogArtifact(this.id, `Step ${step.id}: ${step.description}`, 
         `Tool: ${step.tool}\nStatus: ${step.status}\nOutput: ${(step.result?.output ?? '').slice(0, 2000)}\n${step.result?.error ? `Error: ${step.result.error}` : ''}`
       );
     }
+    
+    this.currentStep = this.plan.steps.length;
+    await this.persist();
   }
 
   private async executeLLMStep(step: PlanStep, toolContext: ToolContext): Promise<ToolResult> {
-    // Ask the LLM to execute using available tools
     this.messages.push({
       role: 'user',
       content: `Execute step ${step.id}: ${step.description}\n\nUse one of the available tools to accomplish this.`,
@@ -251,14 +338,18 @@ export class Agent extends EventEmitter {
 
     this.messages.push({ role: 'assistant', content: response.content, toolCalls: response.toolCalls });
 
-    // If the LLM wants to call a tool
     if (response.toolCalls && response.toolCalls.length > 0) {
       for (const tc of response.toolCalls) {
+        if (tc.function.name === 'python_sandbox') {
+           await this.setState('waiting_feedback');
+           const approved = await new Promise<boolean>((resolve) => { this.resumeResolver = resolve; });
+           await this.setState('executing');
+           if (!approved) return { success: false, output: '', error: 'Human rejected execution.' };
+        }
+        
         const input = JSON.parse(tc.function.arguments);
         const result = await this.tools.execute(tc.function.name, input, toolContext);
-
         this.messages.push({ role: 'tool', content: result.output || result.error || '', name: tc.function.name, toolCallId: tc.id });
-
         if (!result.success) return result;
       }
       return { success: true, output: 'Tool calls executed successfully.' };
@@ -291,15 +382,11 @@ export class Agent extends EventEmitter {
         if (result.success) return result;
       }
     }
-
     return null;
   }
 
-  // ── Phase 3: Verification ──
-
   private async verify(): Promise<void> {
     if (!this.plan) return;
-
     const completedSteps = this.plan.steps.filter(s => s.status === 'completed');
     const failedSteps = this.plan.steps.filter(s => s.status === 'failed');
 
@@ -322,12 +409,10 @@ export class Agent extends EventEmitter {
     this.emitEvent({ type: 'agent:artifact_created', agentId: this.id, artifact });
   }
 
-  // ── Helpers ──
-
   private async setState(state: AgentState): Promise<void> {
     const from = this.state;
     this.state = state;
-    this.updatedAt = Date.now();
+    await this.persist();
     this.emitEvent({ type: 'agent:state_changed', agentId: this.id, from, to: state });
   }
 
@@ -338,5 +423,6 @@ export class Agent extends EventEmitter {
 
   sendFeedback(feedback: string): void {
     this.messages.push({ role: 'user', content: `[User Feedback]: ${feedback}` });
+    this.persist();
   }
 }
