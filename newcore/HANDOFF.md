@@ -146,7 +146,7 @@ newcore/
 ## How to Run
 
 ```bash
-cd D:\opengravity\newcore
+cd newcore
 
 # Install deps (if not already)
 npm install
@@ -191,37 +191,54 @@ npm run cli db:status
 
 ---
 
-## Known Limitations
+## Known Limitations (NOT YET IMPLEMENTED)
 
-1. **No Manager UI dashboard yet.** The `src/server.ts` has 12 new REST endpoints and an SSE stream at `/events`, but no React/Vite frontend consumes them yet. That's Phase 7.
+### 1. Cost Cap Enforcement (⏳ IN PR #28)
+The `cost_events` table records per-call costs, and the orchestrator can SUM them per swarm. However, the active `MAX_COST_USD` enforcement (pause/kill/downgrade on budget overflow) is NOT yet implemented in the main code. 
 
-2. **No cost cap enforcement yet.** The `cost_events` table records per-call costs, and the orchestrator can SUM them per swarm, but the active `MAX_COST_USD` enforcement (pause/kill/downgrade on overflow) is not wired into the agent loop yet.
+**Status:** Ready to merge in PR #28 — includes:
+- `checkCostCap()` function in agent.ts
+- New agent state: `paused_cost_limit`
+- REST API endpoint: `POST /swarms/:id/budget` for budget approval
+- 3 test cases for kill/pause/downgrade actions
 
-3. **The `delegate_task_parallel` parameter** is accepted by the tool but only spawns the first agent and ignores parallel_count > 1. A future iteration should use `Promise.all` over multiple sub-agents.
+### 2. Parallel Multi-Agent Execution (⏳ TODO)
+The `delegate_task_parallel` parameter is accepted by the tool but only spawns the first agent and ignores `parallel_count > 1`. A future iteration should use `Promise.all()` to spawn multiple sub-agents concurrently.
 
-4. **No retention cron yet.** The `retentionDaysLogs`/`retentionDaysCost`/`retentionDaysLwm` config is read but no background job actually deletes old rows. A user has to run the prune manually for now.
+### 3. Retention Cron Job (⏳ TODO)
+The `retentionDaysLogs`/`retentionDaysCost`/`retentionDaysLwm` config is read but no background job actually deletes old rows. Users must manually call the prune functions or implement a cron via `setInterval()`.
 
----
-
-## What's Next (Phase 7)
-
-Build the **Manager UI dashboard** — a React + Vite + Tailwind frontend that consumes the 12 new REST endpoints. Suggested layout:
-
-- **Top bar**: Engine status, current cost, active agent count
-- **Left panel**: Swarm tree (parent → child → grandchild) with live state colors
-- **Center panel**: LWM graph visualization (force-directed, d3-force or react-flow)
-- **Right panel**: Action panel — HitL approve/reject, send feedback, inject invariants
-- **Bottom**: Live event stream (consume `/events` SSE)
-
-Use `npm create vite@latest manager -- --template react-ts` to scaffold. Port 5173 (Vite default). Add a CORS allowance on the Fastify server for `http://localhost:5173`.
+### 4. Manager UI Dashboard (⏳ PHASE 7)
+The REST API has 12 new endpoints and an SSE stream at `/events`, but no React/Vite frontend consumes them yet. That's the next big build.
 
 ---
 
-## Key file paths for the next agent
+## What's Next (Priority Order)
 
-- Server: `newcore/src/server.ts`
-- DB layer: `newcore/src/db/index.ts`
-- Tests: `newcore/tests/`
-- Docs: `newcore/docs/`
-- Backup utility: `newcore/src/db/backup.ts`
-- CLI: `newcore/src/cli.ts`
+### HIGH PRIORITY
+1. **Merge PR #28** — Cost Cap Enforcement
+2. **Implement Parallel Multi-Agent** — Use `Promise.all()` in delegate_task
+3. **Add Retention Cron** — Background job to prune old data
+
+### MEDIUM PRIORITY
+4. **Build Manager UI** — React + Vite + Tailwind frontend
+5. **Add Authentication** — JWT/Bearer tokens on REST API
+6. **Add Webhooks** — Notify external systems on agent events
+
+### LOW PRIORITY
+7. **Performance Tuning** — Index optimization, query caching
+8. **Monitoring & Alerting** — Health checks, Prometheus metrics
+9. **Multi-Tenancy** — Workspace isolation, org-level permissions
+
+---
+
+## Key File Paths
+
+- **Server**: `newcore/src/server.ts`
+- **DB layer**: `newcore/src/db/index.ts`
+- **Tests**: `newcore/tests/`
+- **Docs**: `newcore/docs/`
+- **CLI**: `newcore/src/cli.ts`
+- **Agent**: `newcore/src/orchestrator/agent.ts`
+- **Cost Tracking**: `newcore/src/gateway/cost-recorder.ts`
+- **LWM Persistence**: `newcore/src/memory/snapshot.ts`
