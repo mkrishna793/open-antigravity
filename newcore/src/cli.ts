@@ -278,7 +278,7 @@ swarmsCmd.action(async () => {
   for (const s of swarms) {
     const task = s.rootTask.length > 50 ? s.rootTask.slice(0, 47) + '...' : s.rootTask;
     const created = new Date(s.createdAt).toISOString();
-    const statusColor = s.status === 'completed' ? chalk.green : (s.status === 'executing' || s.status === 'active' ? chalk.cyan : (s.status === 'failed' ? chalk.red : chalk.white));
+    const statusColor = s.status === 'completed' ? chalk.green : (s.status === 'active' ? chalk.cyan : (s.status === 'failed' ? chalk.red : chalk.white));
     console.log(`  ${pad(s.id, 16)} ${statusColor(pad(s.status, 12))} ${pad(task, 52)} ${chalk.gray(created)}`);
   }
   console.log(`\n  Total: ${chalk.cyan(swarms.length)} swarm(s)\n`);

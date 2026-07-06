@@ -6,7 +6,7 @@
 // schema once and the rest of the codebase is unaffected.
 // ═══════════════════════════════════════════════════════════════
 
-import { getDb, withTransaction, prepare } from '../index.js';
+import { getDb, withTransaction } from '../index.js';
 import type { AgentConfig, AgentState, AgentStatus } from '../../types/index.js';
 import { v4 as uuidv4 } from 'uuid';
 

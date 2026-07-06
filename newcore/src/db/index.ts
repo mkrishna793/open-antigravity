@@ -44,7 +44,6 @@ let _migrationsPromise: Promise<any> | null = null;
 // is 2-3x faster than parsing the SQL every time, and the LWM
 // snapshot writer / cost recorder / audit logger all hit the DB
 // on every tick — so the speedup is real.
-const _stmtCache = new Map<string, ReturnType<Client['prepare']>>();
 
 /**
  * Returns the active LibSQL client. The first call triggers a
@@ -164,14 +163,6 @@ export async function withTransaction<T>(fn: (client: Client) => Promise<T>): Pr
  * Use this in hot paths (audit logger, LWM snapshots, cost
  * recorder) where the same statement runs many times.
  */
-export async function prepare(sql: string): Promise<ReturnType<Client['prepare']>> {
-  if (_stmtCache.has(sql)) return _stmtCache.get(sql)!;
-  const db = await getDb();
-  const stmt = db.prepare(sql);
-  _stmtCache.set(sql, stmt);
-  return stmt;
-}
-
 /**
  * Convenience helper: exec a single SQL statement with no args.
  * Used by PRAGMAs and one-off maintenance commands.
@@ -207,7 +198,6 @@ export async function resetForTests(): Promise<void> {
   _db = null;
   _migrationsRun = false;
   _migrationsPromise = null;
-  _stmtCache.clear();
   _pendingPromises.clear();
 }
 
